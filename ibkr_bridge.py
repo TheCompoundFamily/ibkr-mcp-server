@@ -11,6 +11,8 @@ import json
 import logging
 import math
 import os
+import ssl
+import subprocess
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -21,7 +23,36 @@ from ibkr_mcp_server.config import settings
 BRIDGE_PORT = 7499
 TCF_API      = 'https://api.thecompoundfamily.com'
 TOKEN_FILE   = os.path.expanduser('~/.compound_api_token')
+CERT_DIR     = os.path.expanduser('~/.ibkr-certs')
+CERT_FILE    = os.path.join(CERT_DIR, 'localhost+1.pem')
+KEY_FILE     = os.path.join(CERT_DIR, 'localhost+1-key.pem')
 logging.basicConfig(level=logging.WARNING)
+
+
+def _ensure_https_cert():
+    """Generate localhost HTTPS cert via mkcert (trusted by Safari/Chrome/Firefox)."""
+    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
+        return True
+    os.makedirs(CERT_DIR, exist_ok=True)
+    mkcert = subprocess.run(['which', 'mkcert'], capture_output=True, text=True).stdout.strip()
+    if not mkcert:
+        # Try Homebrew path
+        mkcert = '/opt/homebrew/bin/mkcert'
+        if not os.path.exists(mkcert):
+            return False
+    # Install root CA to login keychain (no sudo needed)
+    subprocess.run([mkcert, '-install'], capture_output=True)
+    caroot = subprocess.run([mkcert, '-CAROOT'], capture_output=True, text=True).stdout.strip()
+    ca_cert = os.path.join(caroot, 'rootCA.pem')
+    subprocess.run([
+        'security', 'add-trusted-cert', '-d', '-r', 'trustRoot',
+        '-k', os.path.expanduser('~/Library/Keychains/login.keychain-db'), ca_cert
+    ], capture_output=True)
+    subprocess.run(
+        [mkcert, '-cert-file', CERT_FILE, '-key-file', KEY_FILE, 'localhost', '127.0.0.1'],
+        capture_output=True
+    )
+    return os.path.exists(CERT_FILE)
 
 # ── Persistent token helpers ───────────────────────────────────
 
@@ -433,16 +464,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
 # ── Main ───────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print("""
-╔══════════════════════════════════════════╗
-║  The Compound Family — IBKR Bridge       ║
-║  Listening on http://localhost:7499      ║
-║  Open IBKR TWS before starting           ║
-╚══════════════════════════════════════════╝
-""")
     run_async(ensure_connected())
     server = HTTPServer(('127.0.0.1', BRIDGE_PORT), BridgeHandler)
-    print('✓ Ready. The backtest page will detect IBKR automatically.\n')
+
+    # HTTPS required for Safari (blocks http://localhost from HTTPS pages)
+    https_ok = _ensure_https_cert()
+    if https_ok:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(CERT_FILE, KEY_FILE)
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        protocol = 'https'
+    else:
+        protocol = 'http'
+
+    print(f'✓ IBKR Bridge ready — {protocol}://localhost:{BRIDGE_PORT}\n')
     try:
         server.serve_forever()
     except KeyboardInterrupt:
