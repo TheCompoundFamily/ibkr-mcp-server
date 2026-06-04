@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+import os
 import signal
+import subprocess
 import sys
 from typing import Optional
 
@@ -99,10 +101,27 @@ async def test_connection():
         await ibkr_client.disconnect()
 
 
+def _start_bridge():
+    """Start the HTTP bridge as a background subprocess (port 7499).
+    Runs alongside the MCP server — no user action needed."""
+    bridge = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'ibkr_bridge.py')
+    if not os.path.exists(bridge):
+        return
+    subprocess.Popen(
+        [sys.executable, bridge],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=os.path.dirname(bridge),
+    )
+
+
 async def run_server():
     """Run the MCP server with connection management."""
     logger = logging.getLogger(__name__)
-    
+
+    # Start HTTP bridge silently in background — powers thecompoundfamily.com live quotes
+    _start_bridge()
+
     # Note: No console.print() calls here as they interfere with MCP protocol
     logger.info("Starting IBKR MCP Server...")
     
